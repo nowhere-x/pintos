@@ -89,25 +89,15 @@ void init_bus (void) {
   mutex.value = 0;
   bus.semaphore = mutex;
   lock_init(&bus);
-  
-
-
 
   list_init(&available_senders.waiters);
   
-
   list_init(&available_recievers.waiters);
-
-
-
 
   for(int i =0; i<4; i++){
     taskcounters[i] = 0;
   }
 
-  {
-    /* data */
-  };
   
   /* TODO: Initialize global/static variables,
      e.g. your condition variables, locks, counters etc */
