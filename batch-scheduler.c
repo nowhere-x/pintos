@@ -50,11 +50,23 @@ typedef enum {
   NUM_OF_PRIORITIES
 } priority_t;
 
+
+#define OFFSET 2
+
+#define NUM_OF_QUEUES (NUM_OF_PRIORITIES * OFFSET)
+
 typedef struct {
   direction_t direction;
   priority_t priority;
   unsigned long transfer_duration;
 } task_t;
+
+
+static struct lock bus;
+static int current_direction = 0;
+static int nr_tasks_on_bus = 0;
+static int taskcounters[NUM_OF_QUEUES] = {0};
+static struct condition waiting_queue[NUM_OF_QUEUES];
 
 void init_bus (void);
 void batch_scheduler (unsigned int num_priority_send,
@@ -75,30 +87,13 @@ static void transfer_data (const task_t *task);
 
 /* Releases the slot */
 static void release_slot (const task_t *task);
-static struct lock bus;
-static int current_direction = 0;
-static struct condition available_senders;
-static struct condition available_recievers;
-static int nr_tasks_on_bus = 0;
-static int taskcounters[4];
+
 void init_bus (void) {
-
   random_init ((unsigned int)123456789);
-  bus.holder = thread_current();
-  struct semaphore mutex;
-  mutex.value = 0;
-  bus.semaphore = mutex;
   lock_init(&bus);
+  for (int i = 0; i < NUM_OF_QUEUES; i++)
+    cond_init(&waiting_queue[i]);
 
-  list_init(&available_senders.waiters);
-  
-  list_init(&available_recievers.waiters);
-
-  for(int i =0; i<4; i++){
-    taskcounters[i] = 0;
-  }
-
-  
   /* TODO: Initialize global/static variables,
      e.g. your condition variables, locks, counters etc */
 }
@@ -194,12 +189,35 @@ static direction_t other_direction(direction_t this_direction) {
   return this_direction == SEND ? RECEIVE : SEND;
 }
 
-void get_slot (const task_t *task) {
-  lock_acquire(&bus);
-  while(nr_tasks_on_bus == BUS_CAPACITY) {
+int index_convert(const task_t* task) {
+  return task->direction + (task->priority * OFFSET);
+}
 
+// helper function: to check 
+bool priority_check(const task_t* task) {
+  if (task->priority == PRIORITY)
+    return true;
+  
+  if (taskcounters[task->direction + OFFSET] > 0 || taskcounters[1 - task->direction + OFFSET] > 0)
+    return false;
+  else 
+    return true;
+}
+
+void get_slot (const task_t *task) {
+  int index = index_convert(task);
+  lock_acquire(&bus);
+  while( nr_tasks_on_bus == BUS_CAPACITY 
+  || (nr_tasks_on_bus > 0 && current_direction != task->direction) 
+  || !priority_check(task) ) {
+    taskcounters[index]++;
+    cond_wait(&waiting_queue[index], &bus);
+    taskcounters[index]--;
   }
 
+  nr_tasks_on_bus++;
+  current_direction = task->direction;
+  lock_release(&bus);
   /* TODO: Try to get a slot, respect the following rules:
    *        1. There can be only BUS_CAPACITY tasks using the bus
    *        2. The bus is half-duplex: All tasks using the bus should be either
@@ -211,9 +229,6 @@ void get_slot (const task_t *task) {
    * feel free to schedule priority tasks of the same direction,
    * even if there are priority tasks of the other direction waiting
    */
-
-
-
 }
 
 void transfer_data (const task_t *task) {
@@ -223,6 +238,53 @@ void transfer_data (const task_t *task) {
 
 void release_slot (const task_t *task) {
 
+  lock_acquire(&bus);
+  nr_tasks_on_bus--;
+
+  bool prior_exists = true;
+  // priority tasks got signaled first
+  if (taskcounters[current_direction + OFFSET] > 0) {
+    cond_signal(&waiting_queue[current_direction + OFFSET], &bus);
+  }
+  else if (taskcounters[1 - current_direction + OFFSET] > 0) {
+    if (nr_tasks_on_bus == 0)
+      cond_broadcast(&waiting_queue[1 - current_direction + OFFSET], &bus);
+  }
+  else {
+    prior_exists = false;
+  }
+
+  // check normal tasks
+  if (!prior_exists) {
+    if (taskcounters[current_direction] > 0) {
+      cond_signal(&waiting_queue[current_direction], &bus);
+    }
+    else if (nr_tasks_on_bus == 0) {
+      cond_broadcast(&waiting_queue[1 - current_direction], &bus);
+    }
+  }
+
+  // //multiple priorities support
+  // bool prior_exists = true;
+  // int cur_idx, oppo_idx;
+  // for (int i = NUM_OF_QUEUES - OFFSET; i >= 0 && prior_exists == false; i -= 2) {
+  //   prior_exists = true;
+  //   cur_idx = i + current_direction, oppo_idx = i + other_direction(current_direction);
+  //   if (taskcounters[cur_idx] > 0) {
+  //     cond_signal(&waiting_queue[cur_idx], &bus);
+  //   }
+  //   else if (taskcounters[oppo_idx] > 0) {
+  //     if (nr_tasks_on_bus == 0) {
+  //       cond_broadcast(&waiting_queue[oppo_idx], &bus);
+  //     }
+  //   }
+  //   // no tasks of this priority level exist
+  //   else {
+  //     prior_exists = false;
+  //   }
+  // }
+
+  lock_release(&bus);
   /* TODO: Release the slot, think about the actions you need to perform:
    *       - Do you need to notify any waiting task?
    *       - Do you need to increment/decrement any counter?
